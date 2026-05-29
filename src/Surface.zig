@@ -624,10 +624,44 @@ pub fn init(
         break :command config.command;
     };
 
+    // Whether this apprt supports the "passthru" IO backend (embedder-provided
+    // IO, e.g. an SSH transport). Only apprts that declare these methods on
+    // their Surface support it; everyone else always uses exec.
+    const supports_passthru = @hasDecl(@TypeOf(rt_surface.*), "passthruConfig") and
+        @hasDecl(@TypeOf(rt_surface.*), "ioBackend");
+
     // Start our IO implementation
     // This separate block ({}) is important because our errdefers must
     // be scoped here to be valid.
-    {
+    io_init: {
+        // Passthru backend: no subprocess, IO comes from the embedder.
+        if (comptime supports_passthru) {
+            if (rt_surface.ioBackend() == .passthru) {
+                var io_passthru = try termio.Passthru.init(
+                    alloc,
+                    rt_surface.passthruConfig(),
+                );
+                errdefer io_passthru.deinit();
+
+                var io_mailbox = try termio.Mailbox.initSPSC(alloc);
+                errdefer io_mailbox.deinit(alloc);
+
+                try termio.Termio.init(&self.io, alloc, .{
+                    .size = size,
+                    .full_config = config,
+                    .config = try termio.Termio.DerivedConfig.init(alloc, config),
+                    .backend = .{ .passthru = io_passthru },
+                    .mailbox = io_mailbox,
+                    .renderer_state = &self.renderer_state,
+                    .renderer_wakeup = render_thread.wakeup,
+                    .renderer_mailbox = render_thread.mailbox,
+                    .surface_mailbox = .{ .surface = self, .app = app_mailbox },
+                });
+
+                break :io_init;
+            }
+        }
+
         var env = rt_surface.defaultTermioEnv() catch |err| env: {
             // If an error occurs, we don't want to block surface startup.
             log.warn("error getting env map for surface err={}", .{err});
@@ -1311,9 +1345,13 @@ fn childExitedAbnormally(
     const alloc = arena.allocator();
 
     // Build up our command for the error message
-    const command = try std.mem.join(alloc, " ", switch (self.io.backend) {
-        .exec => |*exec| exec.subprocess.args,
-    });
+    const command = switch (self.io.backend) {
+        .exec => |*exec| try std.mem.join(alloc, " ", exec.subprocess.args),
+        // Passthru owns no subprocess, so there's no command to report. This
+        // path is effectively unreachable for passthru (no child to exit) but
+        // must be handled for the switch to be exhaustive.
+        .passthru => try alloc.dupe(u8, ""),
+    };
     const runtime_str = try std.fmt.allocPrint(alloc, "{d} ms", .{info.runtime_ms});
 
     self.renderer_state.mutex.lock();

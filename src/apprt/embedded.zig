@@ -19,6 +19,7 @@ const CoreApp = @import("../App.zig");
 const CoreInspector = @import("../inspector/main.zig").Inspector;
 const CoreSurface = @import("../Surface.zig");
 const configpkg = @import("../config.zig");
+const termio = @import("../termio.zig");
 const Config = configpkg.Config;
 const String = @import("../main_c.zig").String;
 
@@ -417,6 +418,13 @@ pub const Surface = struct {
     cursor_pos: apprt.CursorPos,
     inspector: ?*Inspector = null,
 
+    /// The IO backend selected for this surface and the passthru callbacks
+    /// (only meaningful when io_backend == .passthru). These are read by the
+    /// core surface during init via ioBackend()/passthruConfig().
+    io_backend: apprt.IOBackend = .exec,
+    pty_write_cb: ?termio.Passthru.WriteFn = null,
+    pty_resize_cb: ?termio.Passthru.ResizeFn = null,
+
     /// The current title of the surface. The embedded apprt saves this so
     /// that getTitle works without the implementer needing to save it.
     title: ?[:0]const u8 = null,
@@ -462,6 +470,23 @@ pub const Surface = struct {
 
         /// Context for the new surface
         context: apprt.surface.NewSurfaceContext = .window,
+
+        /// Selects the IO backend. The default (exec) runs a local subprocess
+        /// on a pty. `passthru` owns no process and routes IO through the
+        /// callbacks below; this is used to drive the terminal from an external
+        /// transport such as SSH (e.g. on iOS). See termio.Passthru.
+        io_backend: apprt.IOBackend = .exec,
+
+        /// For the passthru backend: invoked with bytes the terminal wants to
+        /// send to the "pty" (keyboard input, query responses, etc.). The
+        /// `userdata` above is passed as the first argument. Invoked on the IO
+        /// thread; must not block. Ignored for the exec backend.
+        pty_write_cb: ?termio.Passthru.WriteFn = null,
+
+        /// For the passthru backend: invoked when the terminal is resized so
+        /// the embedder can notify the remote (e.g. SSH window-change). Args:
+        /// userdata, columns, rows, width_px, height_px. Ignored for exec.
+        pty_resize_cb: ?termio.Passthru.ResizeFn = null,
     };
 
     pub fn init(self: *Surface, app: *App, opts: Options) !void {
@@ -476,6 +501,9 @@ pub const Surface = struct {
             },
             .size = .{ .width = 800, .height = 600 },
             .cursor_pos = .{ .x = -1, .y = -1 },
+            .io_backend = opts.io_backend,
+            .pty_write_cb = opts.pty_write_cb,
+            .pty_resize_cb = opts.pty_resize_cb,
         };
 
         // Add ourselves to the list of surfaces on the app.
@@ -636,6 +664,23 @@ pub const Surface = struct {
 
     pub fn rtApp(self: *const Surface) *App {
         return self.app;
+    }
+
+    /// The IO backend selected for this surface. Read by the core surface
+    /// during init to decide between the exec and passthru backends.
+    pub fn ioBackend(self: *const Surface) apprt.IOBackend {
+        return self.io_backend;
+    }
+
+    /// The passthru backend configuration for this surface. Only meaningful
+    /// when ioBackend() == .passthru. The callbacks receive this surface's
+    /// userdata so the embedder can recover its own object.
+    pub fn passthruConfig(self: *const Surface) termio.Passthru.Config {
+        return .{
+            .userdata = self.userdata,
+            .write_cb = self.pty_write_cb,
+            .resize_cb = self.pty_resize_cb,
+        };
     }
 
     pub fn close(self: *const Surface, process_alive: bool) void {
@@ -1821,6 +1866,25 @@ pub const CAPI = struct {
         len: usize,
     ) void {
         surface.textCallback(ptr[0..len]);
+    }
+
+    /// Inject incoming data into a passthru-backed surface, as if it had been
+    /// read from a pty. This is how an embedder (e.g. an SSH client) feeds
+    /// received bytes into the terminal. It is only valid for surfaces created
+    /// with io_backend == GHOSTTY_IO_BACKEND_PASSTHRU; for other backends it is
+    /// ignored. Safe to call from any thread (it takes the renderer lock), the
+    /// same way the exec backend's read thread delivers pty output.
+    export fn ghostty_surface_pty_data(
+        surface: *Surface,
+        ptr: [*]const u8,
+        len: usize,
+    ) void {
+        if (surface.io_backend != .passthru) {
+            log.warn("ghostty_surface_pty_data called on non-passthru surface; ignoring", .{});
+            return;
+        }
+        if (len == 0) return;
+        surface.core_surface.io.processOutput(ptr[0..len]);
     }
 
     /// Set the preedit text for the surface. This is used for IME

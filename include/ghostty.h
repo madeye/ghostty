@@ -464,6 +464,31 @@ typedef enum {
   GHOSTTY_SURFACE_CONTEXT_SPLIT = 2,
 } ghostty_surface_context_e;
 
+// Selects the terminal IO backend for a surface.
+typedef enum {
+  // Run a local subprocess on a pty (the default).
+  GHOSTTY_IO_BACKEND_EXEC = 0,
+  // No subprocess; the embedder provides IO via the callbacks below and
+  // ghostty_surface_pty_data. Used to drive the terminal from an external
+  // transport such as SSH (e.g. on iOS, where fork/exec is unavailable).
+  GHOSTTY_IO_BACKEND_PASSTHRU = 1,
+} ghostty_io_backend_e;
+
+// Invoked (on the IO thread) with bytes the terminal wants to send to the
+// "pty": keyboard input, query responses, clipboard, etc. The embedder
+// forwards these to its transport. MUST NOT block.
+typedef void (*ghostty_surface_pty_write_cb)(void* userdata,
+                                             const uint8_t* ptr,
+                                             uintptr_t len);
+
+// Invoked (on the IO thread) when the terminal is resized so the embedder can
+// notify the remote (e.g. an SSH window-change request).
+typedef void (*ghostty_surface_pty_resize_cb)(void* userdata,
+                                              uint16_t columns,
+                                              uint16_t rows,
+                                              uint32_t width_px,
+                                              uint32_t height_px);
+
 typedef struct {
   ghostty_platform_e platform_tag;
   ghostty_platform_u platform;
@@ -477,6 +502,13 @@ typedef struct {
   const char* initial_input;
   bool wait_after_command;
   ghostty_surface_context_e context;
+
+  // IO backend selection and passthru callbacks. The callbacks are only used
+  // when io_backend == GHOSTTY_IO_BACKEND_PASSTHRU and receive `userdata`
+  // (above) as their first argument.
+  ghostty_io_backend_e io_backend;
+  ghostty_surface_pty_write_cb pty_write_cb;
+  ghostty_surface_pty_resize_cb pty_resize_cb;
 } ghostty_surface_config_s;
 
 typedef struct {
@@ -1126,6 +1158,7 @@ GHOSTTY_API bool ghostty_surface_key_is_binding(ghostty_surface_t,
                                                    ghostty_input_key_s,
                                                    ghostty_binding_flags_e*);
 GHOSTTY_API void ghostty_surface_text(ghostty_surface_t, const char*, uintptr_t);
+GHOSTTY_API void ghostty_surface_pty_data(ghostty_surface_t, const uint8_t*, uintptr_t);
 GHOSTTY_API void ghostty_surface_preedit(ghostty_surface_t, const char*, uintptr_t);
 GHOSTTY_API bool ghostty_surface_mouse_captured(ghostty_surface_t);
 GHOSTTY_API bool ghostty_surface_mouse_button(ghostty_surface_t,

@@ -24,6 +24,16 @@ pub const Action = action.Action;
 pub const Runtime = @import("apprt/runtime.zig").Runtime;
 pub const Target = action.Target;
 
+/// Selects the terminal IO backend for a surface. `exec` runs a local
+/// subprocess on a pty (the default). `passthru` owns no process and lets the
+/// embedder provide IO (e.g. an SSH transport); see termio.Passthru. Only
+/// apprts that declare `ioBackend`/`passthruConfig` on their Surface support
+/// `passthru` (currently the embedded/libghostty apprt).
+pub const IOBackend = enum(c_int) {
+    exec = 0,
+    passthru = 1,
+};
+
 pub const ContentScale = structs.ContentScale;
 pub const Clipboard = structs.Clipboard;
 pub const ClipboardContent = structs.ClipboardContent;
