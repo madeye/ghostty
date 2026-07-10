@@ -1059,7 +1059,11 @@ fn resizeCols(
         break :cursor .{
             .tracked_pin = c.pin orelse try self.trackPin(p),
             .untrack = c.pin == null,
-            .remaining_rows = self.rows - c.y - 1,
+            // Saturating: when rows and cols shrink together (e.g. a font
+            // size increase), rows were already resized above and c.y is the
+            // caller's pre-resize cursor row, which can now be beyond the
+            // bottom.
+            .remaining_rows = self.rows -| c.y -| 1,
             .wrapped_rows = wrapped,
         };
     } else null;
